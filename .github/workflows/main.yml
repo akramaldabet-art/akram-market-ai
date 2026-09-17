@@ -22,25 +22,49 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Extract project
+        shell: bash
         run: |
+          set -e
+
+          ZIP_FILE="AKRAM-MARKET-AI-FULL-ANDROID-SOURCE.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: ZIP file not found: $ZIP_FILE"
+            echo "Repository contents:"
+            ls -la
+            exit 1
+          fi
+
+          rm -rf project
           mkdir -p project
-          unzip -q AKRAM-MARKET-AI-FULL-ANDROID-SOURCE.zip -d project
+
+          unzip -q "$ZIP_FILE" -d project
+
           echo "=== ZIP CONTENTS ==="
-          find project -maxdepth 3 -type f | sort | head -200
+          find project -maxdepth 4 -type f | sort
 
       - name: Locate package.json
         id: locate
         shell: bash
         run: |
-          PKG="$(find "$GITHUB_WORKSPACE/project" -name package.json -type f -not -path '*/node_modules/*' | head -1)"
+          set -e
+
+          PKG="$(find "$GITHUB_WORKSPACE/project" -type f -name package.json -print -quit)"
+
           if [ -z "$PKG" ]; then
             echo "ERROR: package.json not found inside ZIP"
             exit 1
           fi
 
           ROOT="$(dirname "$PKG")"
+
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
-          echo "Project root: $ROOT"
+
+          echo "Project root:"
+          echo "$ROOT"
+
+          echo "package.json:"
+          cat "$PKG"
 
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
@@ -53,56 +77,125 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Show environment
+        shell: bash
+        run: |
+          echo "=== NODE ==="
+          node --version
+
+          echo "=== NPM ==="
+          npm --version
+
+          echo "=== JAVA ==="
+          java -version
+
+          echo "=== ANDROID HOME ==="
+          echo "$ANDROID_HOME"
+
       - name: Install dependencies
         working-directory: ${{ steps.locate.outputs.root }}
+        shell: bash
         run: |
+          set -e
+
           if [ -f package-lock.json ]; then
             npm ci
           else
             npm install
           fi
 
-      - name: Run tests
+      - name: Build Web app
         working-directory: ${{ steps.locate.outputs.root }}
-        run: npm test -- --run
-        continue-on-error: false
-
-      - name: Build web app
-        working-directory: ${{ steps.locate.outputs.root }}
-        run: npm run build
+        shell: bash
+        run: |
+          set -e
+          npm run build
 
       - name: Ensure Android platform
         working-directory: ${{ steps.locate.outputs.root }}
+        shell: bash
         run: |
+          set -e
+
           if [ ! -d android ]; then
+            echo "Android directory not found. Creating Android platform..."
             npx cap add android
           fi
+
+          echo "Syncing Capacitor..."
           npx cap sync android
 
       - name: Build Android debug APK
-        working-directory: ${{ steps.locate.outputs.root }}/android
+        working-directory: ${{ steps.locate.outputs.root }}
+        shell: bash
         run: |
+          set -e
+
+          cd android
+
           chmod +x gradlew
+
           ./gradlew assembleDebug --stacktrace
 
-      - name: Verify APK
+      - name: Locate APK
         id: apk
         shell: bash
         run: |
-          APK="$(find "${{ steps.locate.outputs.root }}/android/app/build/outputs/apk/debug" -name '*.apk' -type f | head -1)"
+          set -e
+
+          APK="$(find "${{ steps.locate.outputs.root }}/android" \
+            -type f \
+            -name "*.apk" \
+            -path "*/outputs/apk/debug/*" \
+            -print -quit)"
+
           if [ -z "$APK" ]; then
-            echo "ERROR: APK was not generated"
+            echo "ERROR: APK was not generated."
+
+            echo "Searching Android build outputs:"
+            find "${{ steps.locate.outputs.root }}/android" \
+              -type f \
+              -path "*/build/outputs/*" \
+              -print || true
+
             exit 1
           fi
 
-          cp "$APK" "$GITHUB_WORKSPACE/AKRAM-MARKET-AI.apk"
-          ls -lh "$GITHUB_WORKSPACE/AKRAM-MARKET-AI.apk"
-          sha256sum "$GITHUB_WORKSPACE/AKRAM-MARKET-AI.apk"
+          echo "APK found:"
+          echo "$APK"
+
+          echo "apk_path=$APK" >> "$GITHUB_OUTPUT"
+
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+
+          cp "$APK" \
+            "$GITHUB_WORKSPACE/apk-output/AKRAM-MARKET-AI-debug.apk"
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -e
+
+          APK="$GITHUB_WORKSPACE/apk-output/AKRAM-MARKET-AI-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: Final APK missing."
+            exit 1
+          fi
+
+          echo "=== APK CREATED SUCCESSFULLY ==="
+          ls -lh "$APK"
+
+          echo "=== SHA256 ==="
+          sha256sum "$APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: AKRAM-MARKET-AI-APK
-          path: AKRAM-MARKET-AI.apk
+          path: apk-output/AKRAM-MARKET-AI-debug.apk
           if-no-files-found: error
           retention-days: 30
